@@ -84,10 +84,10 @@ def get_water_molecules_and_com(coords, atom_list, z_bot, z_top):
             # Center of mass = sum [ position of atom * weight of atom ]
             # Mass of O = 16
             com_o = mol[0] * 16
-            # Mass of H = 3
-            list_h = [i * 3 for i in mol[1:]]
+            # Mass of H = 1
+            list_h = [i * 1 for i in mol[1:]]
             com_h = sum(list_h)
-            center_of_mass = (com_o + com_h) / (16 + (len(list_h) * 3))
+            center_of_mass = (com_o + com_h) / (16 + (len(list_h) * 1))
             data_com.append(center_of_mass)
 
     data_water_molecule = np.array(data_coords)
@@ -283,11 +283,11 @@ class Trajectory:
 
         # Convert to units of g/cm^3.
         if atom_type == "H2O":
-            mass = 16+3+3
+            mass = 16+1+1
         elif atom_type == "O":
             mass = 16
         elif atom_type == "H":
-            mass = 3
+            mass = 1
         else:
             print("Mass of atom", atom_type, "not defined. Please edit the script to include it.")
             #self.rho_of_z = self.rho_of_z / num_atoms
@@ -463,7 +463,7 @@ class Trajectory:
 
                     # Get density * avg(cos(psi)), in g/cm3.
                     volume_box = A * B * self.dz * 10**(-24)
-                    density = (len(water_in_region) * (16+3+3)) / ((6.02214076 * 10**23) * volume_box)
+                    density = (len(water_in_region) * (16+1+1)) / ((6.02214076 * 10**23) * volume_box)
                     avg_cos_psi = np.mean(cos_psi)
                     self.rho_of_z[i] += density * avg_cos_psi
 
