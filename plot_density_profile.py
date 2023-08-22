@@ -653,29 +653,29 @@ if calc_type == '1':
     print("computing...")
     traj.compute_density_profile("H2O")
     traj.plot_density_profile("H2O")
-elif calc_type == 2:
+elif calc_type == '2':
     print("computing...")
     traj.compute_density_profile("O")
     traj.plot_density_profile("O")
-elif calc_type == 3:
+elif calc_type == '3':
     print("computing...")
     traj.compute_density_profile("H")
     traj.plot_density_profile("H")
-elif calc_type == 4:
+elif calc_type == '4':
     print("Make sure z_range_min and z_range_max are set correctly")
     print("computing...")
     traj.compute_angle_distribution()
-    traj.plot_dipole_orientation()
-elif calc_type == 5:
+    traj.plot_dipole_distribution()
+elif calc_type == '5':
     print("Make sure z_range_min and z_range_max are set correctly")
     print("computing...")
     traj.compute_angle_distribution()
     traj.plot_OH_angle_distribution()
-elif calc_type == 6:
+elif calc_type == '6':
     print("computing...")
     traj.compute_dipole_orientation()
-    traj.plot_dipole_distribution()
-elif calc_type == 7:
+    traj.plot_dipole_orientation()
+elif calc_type == '7':
     print("Make sure z_range_min and z_range_max are set correctly")
     print("computing...")
     traj.compute_avg_cos_dipole()
