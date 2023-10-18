@@ -27,6 +27,20 @@ def distance(x0, x1):
     delta = np.where(delta > 0.5 * dimensions, delta - dimensions, delta)
     return np.sqrt((delta ** 2).sum(axis=-1))
 
+def apply_period_boundary(coord):
+    new_coord = [ i for i in coord]
+    # Translate x-coordinate.
+    while new_coord[0] < 0:
+        new_coord[0] = new_coord[0] + A
+    while new_coord[0] > A:
+        new_coord[0] = new_coord[0] - A
+    # Translate y-coordinate.
+    while new_coord[1] < 0:
+        new_coord[1] = new_coord[1] + B
+    while new_coord[1] > B:
+        new_coord[1] = new_coord[1] - B
+    return new_coord
+
 def get_H2O_from_O_and_H(data_oxygen, data_hydrogen):
     """Arrange O and H coordinates in lists of [O,H,H] - corresponding to each H2O.
     If number of H in 1.2 A radius of O is not equal to 2, this means it is H3O+ or OH-.
@@ -117,17 +131,34 @@ def get_water_cuboid(coords, atom_list, x1, x2, y1, y2, z1, z2):
     data_oxygen = []
     data_hydrogen = []
     for i, atom in enumerate(coords):
+        # Check if atom lies in box region.
         if atom_list[i] == "O":
-            # check if atom lies in box region
-            if (x1 < atom[0] < x2) and (y1 < atom[1] < y2) and (z1 < atom[2] < z2):
+            pbc_atom = apply_period_boundary(atom)
+            # (xi - A) and (xi + A) regions are checked to account for cuboid box
+            #   crossing periodic boundary.
+            in_x = ((x1 < pbc_atom[0] < x2)
+                or (x1 - A < pbc_atom[0] < x2 - A)
+                or (x1 + A < pbc_atom[0] < x2 + A))
+            in_y = ((y1 < pbc_atom[1] < y2)
+                or (y1 - B < pbc_atom[1] < y2 - B)
+                or (y1 + B < pbc_atom[1] < y2 + B))
+            in_z = (z1 < pbc_atom[2] < z2)
+            if in_x and in_y and in_z:
                 data_oxygen.append(atom)
         if atom_list[i] == "H":
-            # check if atom lies in box region
+            pbc_atom = apply_period_boundary(atom)
             # Add 1.2 ang to the search region, to account for H2O
             #   that lie on the edge of the region.
             # The final H2O in this region are determined by O coords,
             #   so extra counting of H is okay.
-            if (x1 - 1.2 < atom[0] < x2 + 1.2) and (y1 - 1.2 < atom[1] < y2 + 1.2) and (z1 - 1.2 < atom[2] < z2 + 1.2):
+            in_x = ((x1 - 1.2 < pbc_atom[0] < x2 + 1.2)
+                or (x1 - A - 1.2 < pbc_atom[0] < x2 - A + 1.2)
+                or (x1 + A - 1.2 < pbc_atom[0] < x2 + A + 1.2))
+            in_y = ((y1 - 1.2 < pbc_atom[1] < y2 + 1.2)
+                or (y1 - B - 1.2 < pbc_atom[1] < y2 - B + 1.2)
+                or (y1 + B - 1.2 < pbc_atom[1] < y2 + B + 1.2))
+            in_z = (z1 - 1.2 < pbc_atom[2] < z2 + 1.2)
+            if in_x and in_y and in_z:
                 data_hydrogen.append(atom)
     data_oxygen = np.array(data_oxygen)
     data_hydrogen = np.array(data_hydrogen)
@@ -162,10 +193,10 @@ def get_water_sphere(coords, atom_list, p, r):
 
 class Trajectory:
     def __init__(self, filename, file_type, skip, z_bot_interface, z_top_interface,
-                 start_timestep, stop_timestep, interface_offset=0.0, resolution=200,
+                 start_timestep, stop_timestep, interface_offset=0.0, resolution=201,
                  d_angle=5, z_range_min=0.0, z_range_max=5.0, x_min=0.0,
-                 x_max=0.0, y_min=0.0, y_max=0.0, center_atom_list=[0], r=0.0,
-                 spherical_resolution=10):
+                 x_max=0.0, y_min=0.0, y_max=0.0, cuboid_resolution=11,
+                 center_atom_list=[0], r=0.0, spherical_resolution=11):
         """
         filename         : Path to the trajectory file.
         file_type         : xyz or vasp
@@ -213,10 +244,11 @@ class Trajectory:
         self.surface_normal = np.array([0, 0, 1])
         self.d_angle = d_angle
         # Uncomment this line for considering full electrolyte volume for angle distributions.
-        # z_range_max = self.z_top - self.z_bot
+        #z_range_max = self.z_top - self.z_bot
         self.z_range = np.array([z_range_min, z_range_max])
         self.x_range = np.array([x_min, x_max])
         self.y_range = np.array([y_min, y_max])
+        self.cuboid_resolution = cuboid_resolution
         self.center_atom_list = center_atom_list
         self.r = r
         self.spherical_resolution = spherical_resolution
@@ -302,7 +334,170 @@ class Trajectory:
                 self.coordinates[step] = coords
             print('parse done')
 
-    def compute_spherical_density_profile(self, atom_type):
+    def compute_cuboid_density_profile(self, atom_type):
+        # Define step size, dz.
+        self.dz = (self.z_range[1] - self.z_range[0]) / self.cuboid_resolution
+        # Divide electrolyte length into units of dz.
+        self.z_step = np.linspace(0.0, self.cuboid_resolution * self.dz, self.cuboid_resolution)
+
+        # Initialize list for storing density profile, rho_of_z.
+        self.rho_of_z = np.zeros(self.cuboid_resolution)
+
+        for step in range(self.n_steps):
+            if atom_type == "H2O":
+                # Get water molecules and centers of mass.
+                data_coords1, data_com1 = get_water_cuboid(
+                    self.coordinates[step], self.atom_list,
+                    self.x_range[0], self.x_range[1],
+                    self.y_range[0], self.y_range[1],
+                    self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
+                data_coords2, data_com2 = get_water_cuboid(
+                    self.coordinates[step], self.atom_list,
+                    A - self.x_range[1], A - self.x_range[0],
+                    B - self.y_range[1], B - self.y_range[0],
+                    self.z_top - self.z_range[1], self.z_top - self.z_range[0])
+            else:
+                # Only works with H2O for now.
+                print("Incorrect atom_type. Please choose 'H2O'.")
+                return
+            # Combine all H2Os and account for empty arrays.
+            if data_coords1.size and data_coords2.size:
+                data_coords = np.vstack([data_coords1,data_coords2])
+            elif data_coords1.size and not data_coords2.size:
+                data_coords = data_coords1
+            elif not data_coords1.size and data_coords2.size:
+                data_coords = data_coords2
+            else:
+                continue
+
+            # Sweep over intervals of dz width from self.z_range[0] to self.z_range[1]
+            #   and count all molecules/atoms (in case of H2O, check coords of O) that
+            #   fall in the region at each step.
+            for i in range(self.cuboid_resolution):
+                z1 = self.z_bot + self.z_range[0] + (i * self.dz)
+                z2 = z1 + self.dz
+                # Account for same region from opposite surface.
+                z2opp = self.z_top - self.z_range[0] - (i * self.dz)
+                z1opp = z2opp - self.dz
+                for water in data_coords:
+                    if z1 < water[0][2] <= z2 or z1opp <= water[0][2] < z2opp:
+                        self.rho_of_z[i] += 1
+
+        # Normalize for number of steps.
+        self.rho_of_z = self.rho_of_z / self.n_steps
+
+        num_atoms = sum(self.rho_of_z)
+        print('Total number:', num_atoms)
+
+        # Convert to units of g/cm^3.
+        if atom_type == "H2O":
+            mass = 16+1+1
+        else:
+            # Only works with H2O for now.
+            print("Incorrect atom_type. Please choose 'H2O'.")
+            return
+        # Factor of 2.0 to account for full region.
+        volume = (
+            (self.x_range[1] - self.x_range[0])
+            * (self.y_range[1] - self.y_range[0])
+            * self.dz * 2.0 * 10**(-24))
+        self.rho_of_z = (self.rho_of_z * (16+1+1)) / ((6.02214076 * 10**23) * volume)
+
+    def compute_cuboid_dipole_orientation(self):
+        # Define step size, dz.
+        self.dz = (self.z_range[1] - self.z_range[0]) / self.cuboid_resolution
+        # Divide electrolyte length into units of dz.
+        self.z_step = np.linspace(0.0, self.cuboid_resolution * self.dz, self.cuboid_resolution)
+
+        # Initialize list for storing density profile, rho_of_z.
+        self.rho_of_z = np.zeros(self.cuboid_resolution)
+
+        cos_psi_all_steps = [ [] for _ in self.z_step]
+
+        for step in range(self.n_steps):
+            # Get water molecules and centers of mass.
+            data_coords1, data_com1 = get_water_cuboid(
+                self.coordinates[step], self.atom_list,
+                self.x_range[0], self.x_range[1],
+                self.y_range[0], self.y_range[1],
+                self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
+            data_coords2, data_com2 = get_water_cuboid(
+                self.coordinates[step], self.atom_list,
+                A - self.x_range[1], A - self.x_range[0],
+                B - self.y_range[1], B - self.y_range[0],
+                self.z_top - self.z_range[1], self.z_top - self.z_range[0])
+            # Combine all H2Os and account for empty arrays.
+            if data_coords1.size and data_coords2.size:
+                data_coords = np.vstack([data_coords1,data_coords2])
+            elif data_coords1.size and not data_coords2.size:
+                data_coords = data_coords1
+            elif not data_coords1.size and data_coords2.size:
+                data_coords = data_coords2
+            else:
+                continue
+
+            # Sweep over intervals of dz width from self.z_range[0] to self.z_range[1]
+            for i in range(self.resolution):
+                z1 = self.z_bot + self.z_range[0] + (i * self.dz)
+                z2 = z1 + self.dz
+                # Account for same region from opposite surface.
+                z2opp = self.z_top - self.z_range[0] - (i * self.dz)
+                z1opp = z2opp - self.dz
+
+                water_in_region1 = []
+                water_in_region2 = []
+                for water in data_coords:
+                    if z1 < water[0][2] <= z2:
+                        water_in_region1.append(water)
+                    elif z1opp <= water[0][2] < z2opp:
+                        water_in_region2.append(water)
+
+                # only works for python lists, not numpy arrays
+                water_in_region = water_in_region1 + water_in_region2
+                if len(water_in_region) > 0:
+                    cos_psi = np.full(len(water_in_region), -2.0)
+                    for k, water in enumerate(water_in_region):
+                        if len(water) == 3:
+                            # Get O-H unit vectors.
+                            vec1 = (
+                                (water[1]-water[0]) / np.linalg.norm(water[1]-water[0]))
+                            vec2 = (
+                                (water[2]-water[0]) / np.linalg.norm(water[2]-water[0]))
+                            # Compute angle-bisector unit vector.
+                            bisector = (vec1 + vec2) / np.linalg.norm(vec1 + vec2)
+
+                            # https://stackoverflow.com/a/13849249
+                            # Get psi in radians.
+                            if np.isin(water, water_in_region1).all():
+                                psi = np.arccos(np.dot(bisector, self.surface_normal))
+                            elif np.isin(water, water_in_region2).all():
+                                # reverse direction of surface normal at opposite surface
+                                psi = np.arccos(np.dot(bisector, -1*self.surface_normal))
+                            cos_psi[k] = np.cos(psi)
+
+                    # Sanity check, to ensure psi from all waters were counted.
+                    if -2 in cos_psi:
+                        print("cos(psi) for some H2O in region", z1, z2, z1opp, z2opp, "were not populated")
+
+                    # Collect all cos_psi which occur within each incremental region.
+                    for value in cos_psi:
+                        cos_psi_all_steps[i].append(value)
+
+            # Sum over all cos_psi within each incremental region.
+            for i, value in enumerate(cos_psi_all_steps):
+                self.rho_of_z[i] = np.sum(value)
+
+        # Normalize for number of steps.
+        self.rho_of_z = self.rho_of_z / self.n_steps
+
+        # Convert to g/cm3. Factor of 2.0 to account for full region.
+        volume = (
+            (self.x_range[1] - self.x_range[0])
+            * (self.y_range[1] - self.y_range[0])
+            * self.dz * 2.0 * 10**(-24))
+        self.rho_of_z = (self.rho_of_z * (16+1+1)) / ((6.02214076 * 10**23) * volume)
+
+    def compute_sphere_density_profile(self, atom_type):
         # Define step size, dr.
         self.dr = self.r / self.spherical_resolution
         # Divide radial length into units of dr.
@@ -344,7 +539,7 @@ class Trajectory:
         # Normalize for number of steps.
         self.rho_of_r = self.rho_of_r / (self.n_steps)
 
-    def compute_spherical_angle_distribution(self, atom_type):
+    def compute_sphere_angle_distribution(self, atom_type):
         angle_resolution = int(180/self.d_angle)
         self.angle_step = np.linspace(0, 180, angle_resolution)
 
@@ -403,8 +598,9 @@ class Trajectory:
         self.theta_dist = self.theta_dist / (self.n_steps * num_centers)
 
     def compute_density_profile(self, atom_type):
-        # Define step size, dz.
-        self.dz = (self.z_top - self.z_bot) / self.resolution
+        # Define step size, dz. Factor of 2.0 to account for splitting the electrolyte
+        #   into two regions and integrating only up till midway form both sides.
+        self.dz = (self.z_top - self.z_bot) / (2.0 * self.resolution)
         # Divide electrolyte length into units of dz.
         self.z_step = np.linspace(0.0, self.resolution * self.dz, self.resolution)
 
@@ -412,27 +608,47 @@ class Trajectory:
         self.rho_of_z = np.zeros(self.resolution)
 
         for step in range(self.n_steps):
-
             if atom_type == "H2O":
-                # Get water molecules and centers of mass.
-                data_coords, data_com = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top)
+                # Get water molecules and centers of mass from both sides.
+                data_coords1, data_com1 = get_water_molecules_and_com(
+                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top / 2)
+                data_coords2, data_com2 = get_water_molecules_and_com(
+                    self.coordinates[step], self.atom_list, self.z_top / 2, self.z_top)
             elif atom_type in self.atoms:
-                # Get atoms of type atom_type. E.g., "O", "H", etc.
-                data_coords, data_com = get_atoms_pos(
+                # Get atoms of type atom_type. E.g., "O", "H", etc. from both sides.
+                data_coords1, data_com1 = get_atoms_pos(
                     atom_type,
-                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top)
+                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top / 2)
+                data_coords2, data_com2 = get_atoms_pos(
+                    atom_type,
+                    self.coordinates[step], self.atom_list, self.z_top / 2, self.z_top)
             else:
                 print("Incorrect atom_type. Please choose one of 'H2O' or", self.atoms)
                 return
-
-            # Sweep over intervals of dz width from z_bot to z_top and
-            #   count all molecules/atoms that fall in the region at each step.
+            # Combine all H2Os and account for empty arrays.
+            if data_coords1.size and data_coords2.size:
+                data_coords = np.vstack([data_coords1,data_coords2])
+            elif data_coords1.size and not data_coords2.size:
+                data_coords = data_coords1
+            elif not data_coords1.size and data_coords2.size:
+                data_coords = data_coords2
+            # Sweep over intervals of dz width and count all molecules/atoms that
+            #   fall in the region at each step.
             for i in range(self.resolution):
                 z1 = self.z_bot + (i * self.dz)
                 z2 = z1 + self.dz
-                for center_of_mass in data_com:
-                    if z1 < center_of_mass[2] <= z2:
+                # Account for same region from opposite surface.
+                z2opp = self.z_top - (i * self.dz)
+                z1opp = z2opp - self.dz
+                for water in data_coords:
+                    if atom_type == "H2O":
+                        # z-coordinate of O atom in H2O.
+                        coord = water[0][2]
+                    else:
+                        # z-coordinate of atom. Here, "water" variable is not water
+                        #   but an atom of atom_type.
+                        coord = water[2]
+                    if z1 < coord <= z2 or z1opp <= water[0][2] < z2opp:
                         self.rho_of_z[i] += 1
 
         # Normalize for number of steps.
@@ -446,7 +662,7 @@ class Trajectory:
         #     data_water_molecules will have length != 3) which indicate that O from
         #     water may have adsorbed on surface, thus leaving the electrolyte region.
         num_atoms = sum(self.rho_of_z)
-        print(num_atoms)
+        print('Total number:', num_atoms)
 
         # Convert to units of g/cm^3.
         if atom_type == "H2O":
@@ -457,14 +673,10 @@ class Trajectory:
             mass = 1
         else:
             print("Mass of atom", atom_type, "not defined. Please edit the script to include it.")
-            #self.rho_of_z = self.rho_of_z / num_atoms
             return
-        volume_box = A * B * self.dz * 10**(-24)
-        self.rho_of_z = (self.rho_of_z * mass) / ((6.02214076 * 10**23) * volume_box)
-        # Print total density, in units of g/cm^3.
-        print('Density:', (sum(self.rho_of_z) * self.dz) / (self.z_top - self.z_bot), 'g/cm3')
-        # Normalize for number of molecules/atoms.
-        #self.rho_of_z = self.rho_of_z / num_atoms
+        total_volume = A * B * self.dz * 2.0 * 10**(-24)
+        self.rho_of_z = (self.rho_of_z * mass) / ((6.02214076 * 10**23) * total_volume)
+        print('Total density:', sum(self.rho_of_z) / self.resolution, 'g/cm3')
 
     def compute_angle_distribution(self):
         angle_resolution = int(180/self.d_angle)
@@ -478,115 +690,131 @@ class Trajectory:
         for step in range(self.n_steps):
 
             # Get water molecules and centers of mass.
-            data_water_molecule, data_com = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top)
+            # Divide the full electrolyte length into two - both regions have opposite
+            #   surface normals.
+            data_coords1, data_com1 = get_water_molecules_and_com(
+                    self.coordinates[step], self.atom_list,
+                    self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
+            data_coords2, data_com2 = get_water_molecules_and_com(
+                    self.coordinates[step], self.atom_list,
+                    self.z_top - self.z_range[1], self.z_top - self.z_range[0])
+            # Combine all H2Os and account for empty arrays.
+            if data_coords1.size and data_coords2.size:
+                data_coords = np.vstack([data_coords1,data_coords2])
+            elif data_coords1.size and not data_coords2.size:
+                data_coords = data_coords1
+            elif not data_coords1.size and data_coords2.size:
+                data_coords = data_coords2
 
-            for water in data_water_molecule:
+            for water in data_coords:
                 if len(water) == 3:
                     # Get O-H unit vectors.
                     vec1 = (
                         (water[1]-water[0]) / np.linalg.norm(water[1]-water[0]))
                     vec2 = (
                         (water[2]-water[0]) / np.linalg.norm(water[2]-water[0]))
-
-                    # Compute psi, dipole-normal angle.
+                    # Compute angle-bisector unit vector.
                     bisector = (vec1 + vec2) / np.linalg.norm(vec1 + vec2)
-                    # https://stackoverflow.com/a/13849249
+
+                    # Compute psi, dipole-normal angle, and theta, OH-normal angle.
                     # Convert radians to degrees.
-                    psi = np.rad2deg(np.arccos(np.dot(bisector, self.surface_normal)))
-                    # Iterate over all molecules and get density profile.
-                    index = int(psi / self.d_angle)
-                    if 0 < index < angle_resolution:
-                        if self.z_range[0] < water[0][2] - self.z_bot <= self.z_range[1]:
-                            self.psi_dist[index] += 1.0
-                        elif self.z_range[0] < self.z_top - water[0][2] <= self.z_range[1]:
-                            self.psi_dist[index] += 1.0
-
-                    # Compute theta, OH-normal angle.
                     # https://stackoverflow.com/a/13849249
-                    theta = np.rad2deg(np.arccos(np.dot(vec1, self.surface_normal)))
-                    # Iterate over all molecules and get density profile.
-                    index = int(theta / self.d_angle)
-                    if 0 < index < angle_resolution:
-                        if self.z_range[0] < water[0][2] - self.z_bot <= self.z_range[1]:
-                            self.theta_dist[index] += 1.0
-                        elif self.z_range[0] < self.z_top - water[0][2] <= self.z_range[1]:
-                            self.theta_dist[index] += 1.0
+                    if data_coords1.size and np.isin(water, data_coords1).all():
+                        psi = np.rad2deg(np.arccos(np.dot(bisector, self.surface_normal)))
+                        theta1 = np.rad2deg(np.arccos(np.dot(vec1, self.surface_normal)))
+                        theta2 = np.rad2deg(np.arccos(np.dot(vec2, self.surface_normal)))
+                    elif data_coords2.size and np.isin(water, data_coords2).all():
+                        # reverse direction of surface normal at opposite surface
+                        psi = np.rad2deg(np.arccos(np.dot(bisector, -1*self.surface_normal)))
+                        theta1 = np.rad2deg(np.arccos(np.dot(vec1, -1*self.surface_normal)))
+                        theta2 = np.rad2deg(np.arccos(np.dot(vec2, -1*self.surface_normal)))
 
-                    theta = np.rad2deg(np.arccos(np.dot(vec2, self.surface_normal)))
-                    # Iterate over all molecules and get density profile.
-                    index = int(theta / self.d_angle)
-                    if 0 < index < angle_resolution:
-                        if self.z_range[0] < water[0][2] - self.z_bot <= self.z_range[1]:
-                            self.theta_dist[index] += 1.0
-                        elif self.z_range[0] < self.z_top - water[0][2] <= self.z_range[1]:
-                            self.theta_dist[index] += 1.0
+                    # Update distribution.
+                    index_psi = int(psi / self.d_angle)
+                    if 0 < index_psi < angle_resolution:
+                        self.psi_dist[index_psi] += 1.0
+                    index_theta1 = int(theta1 / self.d_angle)
+                    if 0 < index_theta1 < angle_resolution:
+                        self.theta_dist[index_theta1] += 1.0
+                    index_theta2 = int(theta2 / self.d_angle)
+                    if 0 < index_theta2 < angle_resolution:
+                        self.theta_dist[index_theta2] += 1.0
 
-        # Get total number of entries.
-        #num_psi = sum(self.psi_dist)
-        #num_theta = sum(self.theta_dist)
-
-        # Normalize for number of steps and number of entries.
-        #self.psi_dist = self.psi_dist / (self.n_steps * num_psi)
-        #self.theta_dist = self.theta_dist / (self.n_steps * num_theta)
-        self.psi_dist = self.psi_dist / self.n_steps
-        self.theta_dist = self.theta_dist / self.n_steps
+        # Normalize.
+        self.psi_dist = self.psi_dist / sum(self.psi_dist)
+        self.theta_dist = self.theta_dist / sum(self.theta_dist)
 
     def compute_avg_cos_dipole(self):
-        cos_psi_all_steps = 0
+        cos_psi_all_steps = []
 
         for step in range(self.n_steps):
 
-            # Get water molecules and centers of mass from both ends of the electrode.
-            data_water_molecule_bot, data_com_bot = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list, self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
-            data_water_molecule_top, data_com_top = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list, self.z_top - self.z_range[1], self.z_top - self.z_range[0])
+            # Get water molecules and centers of mass.
+            # Divide the full electrolyte length into two - both regions have opposite
+            #   surface normals.
+            data_coords1, data_com1 = get_water_molecules_and_com(
+                    self.coordinates[step], self.atom_list,
+                    self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
+            data_coords2, data_com2 = get_water_molecules_and_com(
+                    self.coordinates[step], self.atom_list,
+                    self.z_top - self.z_range[1], self.z_top - self.z_range[0])
+            # Combine all H2Os and account for empty arrays.
+            if data_coords1.size and data_coords2.size:
+                data_coords = np.vstack([data_coords1,data_coords2])
+            elif data_coords1.size and not data_coords2.size:
+                data_coords = data_coords1
+            elif not data_coords1.size and data_coords2.size:
+                data_coords = data_coords2
 
-            data_water_molecule = np.vstack([data_water_molecule_bot,data_water_molecule_top])
-            data_com = np.vstack([data_com_bot,data_com_top])
+            cos_psi = np.full(len(data_coords), -2.0)
 
-            cos_psi = np.full(len(data_water_molecule), -2.0)
-
-            for k in range(len(data_water_molecule)):
-                water = data_water_molecule[k]
+            for k, water in enumerate(data_coords):
                 if len(water) == 3:
                     # Get O-H unit vectors.
                     vec1 = (
                         (water[1]-water[0]) / np.linalg.norm(water[1]-water[0]))
                     vec2 = (
                         (water[2]-water[0]) / np.linalg.norm(water[2]-water[0]))
-
-                    # Compute psi, dipole-normal angle.
+                    # Compute angle-bisector unit vector.
                     bisector = (vec1 + vec2) / np.linalg.norm(vec1 + vec2)
+
                     # https://stackoverflow.com/a/13849249
                     # Get psi in radians.
-                    psi = np.arccos(np.dot(bisector, self.surface_normal))
+                    if data_coords1.size and np.isin(water, data_coords1).all():
+                            psi = np.arccos(np.dot(bisector, self.surface_normal))
+                    elif data_coords2.size and np.isin(water, data_coords2).all():
+                            # reverse direction of surface normal at opposite surface
+                            psi = np.arccos(np.dot(bisector, -1*self.surface_normal))
                     cos_psi[k] = np.cos(psi)
 
             # Sanity check, to ensure psi from all waters were counted.
             if -2 in cos_psi:
-                print("cos(psi) for some H2O were not populated")
+                print("cos(psi) for some H2O were not counted")
 
-            cos_psi_all_steps += np.mean(cos_psi)
+            for i in cos_psi:
+                cos_psi_all_steps.append(i)
 
-        # Normalize for number of steps.
-        cos_psi_all_steps = cos_psi_all_steps / self.n_steps
+        # Normalize
+        cos_psi_all_steps = np.mean(cos_psi_all_steps)
         print('cos_psi_all_steps:', cos_psi_all_steps)
 
     def compute_dipole_orientation(self):
         # Define step size, dz.
-        self.dz = (self.z_top - self.z_bot) / self.resolution
+        # The factor of 2.0 is because we are dividing the full electrolyte length
+        #   into two - both regions have opposite surface normals.
+        self.dz = (self.z_top - self.z_bot) / (2.0 * self.resolution)
         # Divide electrolyte length into units of dz.
         self.z_step = np.linspace(0.0, self.resolution * self.dz, self.resolution)
 
         # Initialize list for storing density profile, rho_of_z.
         self.rho_of_z = np.zeros(self.resolution)
 
+        cos_psi_all_steps = [ [] for _ in self.z_step]
+
         for step in range(self.n_steps):
 
             # Get water molecules and centers of mass.
-            data_water_molecule, data_com = get_water_molecules_and_com(
+            data_coords, data_com = get_water_molecules_and_com(
                     self.coordinates[step], self.atom_list, self.z_bot, self.z_top)
 
             # Sweep over intervals of dz width from z_bot to z_top.
@@ -597,50 +825,103 @@ class Trajectory:
                 z2opp = self.z_top - (i * self.dz)
                 z1opp = z2opp - self.dz
 
-                water_in_region = []
-                for j in range(len(data_com)):
-                    if z1 < data_com[j][2] <= z2 and len(data_water_molecule[j]) == 3:
-                        water_in_region.append(data_water_molecule[j])
-                    elif z1opp <= data_com[j][2] < z2opp and len(data_water_molecule[j]) == 3:
-                        water_in_region.append(data_water_molecule[j])
+                water_in_region1 = []
+                water_in_region2 = []
+                for water in data_coords:
+                    if z1 < water[0][2] <= z2:
+                        water_in_region1.append(water)
+                    elif z1opp <= water[0][2] < z2opp:
+                        water_in_region2.append(water)
 
+                # only works for python lists, not numpy arrays
+                water_in_region = water_in_region1 + water_in_region2
                 if len(water_in_region) > 0:
-
                     cos_psi = np.full(len(water_in_region), -2.0)
-
-                    for k in range(len(water_in_region)):
-                        water = water_in_region[k]
+                    for k, water in enumerate(water_in_region):
                         if len(water) == 3:
                             # Get O-H unit vectors.
                             vec1 = (
                                 (water[1]-water[0]) / np.linalg.norm(water[1]-water[0]))
                             vec2 = (
                                 (water[2]-water[0]) / np.linalg.norm(water[2]-water[0]))
-
-                            # Compute psi, dipole-normal angle.
+                            # Compute angle-bisector unit vector.
                             bisector = (vec1 + vec2) / np.linalg.norm(vec1 + vec2)
+
                             # https://stackoverflow.com/a/13849249
                             # Get psi in radians.
-                            psi = np.arccos(np.dot(bisector, self.surface_normal))
+                            if np.isin(water, water_in_region1).all():
+                                psi = np.arccos(np.dot(bisector, self.surface_normal))
+                            elif np.isin(water, water_in_region2).all():
+                                # reverse direction of surface normal at opposite surface
+                                psi = np.arccos(np.dot(bisector, -1*self.surface_normal))
                             cos_psi[k] = np.cos(psi)
 
                     # Sanity check, to ensure psi from all waters were counted.
                     if -2 in cos_psi:
-                        print("cos(psi) for some H2O in region", z1, z2, z1opp, z2opp, "were not populated")
+                        print("cos(psi) for some H2O in region", z1, z2, z1opp, z2opp, "were not counted")
 
-                    # Get density * avg(cos(psi)), in g/cm3.
-                    volume_box = A * B * self.dz * 10**(-24)
-                    density = (len(water_in_region) * (16+1+1)) / ((6.02214076 * 10**23) * volume_box)
-                    avg_cos_psi = np.mean(cos_psi)
-                    self.rho_of_z[i] += density * avg_cos_psi
+                    # Collect all cos_psi which occur within each incremental region.
+                    for value in cos_psi:
+                        cos_psi_all_steps[i].append(value)
+
+            # Sum over all cos_psi within each incremental region.
+            for i, value in enumerate(cos_psi_all_steps):
+                self.rho_of_z[i] = np.sum(value)
 
         # Normalize for number of steps.
         self.rho_of_z = self.rho_of_z / self.n_steps
 
-    def plot_spherical_density_profile(self, atom_type):
-        """ Plots spherical density profile wrt individual atoms. """
+        # Convert to g/cm3. Factor of 2.0 to account for full region.
+        volume = A * B * self.dz * 2.0 * 10**(-24)
+        self.rho_of_z = (self.rho_of_z * (16+1+1)) / ((6.02214076 * 10**23) * volume)
+
+    def plot_cuboid_density_profile(self, atom_type):
+        """ Plots density profile in a cuboidal region. """
+        if not self.rho_of_z.any():
+            print('compute the density profile first\n')
+            return
+        print('plotting density profile')
+        # normalize so that each point corresponds to density in small box region
+        #rho_dist = self.rho_of_z * self.resolution * 0.5
+        rho_dist = self.rho_of_z
+        # plot
+        plt.plot(self.z_step, rho_dist, 'o-')
+        # save data
+        with open('cuboid_density_profile.dat', 'w') as f:
+            for i in range(len(self.z_step)):
+                f.write(str(self.z_step[i]) + '\t' + str(rho_dist[i]) + '\n')
+        plt.xlabel('z (Å)')
+        plt.ylabel('ρ$_{H_{2}O}$ (g/cm$^3$)')
+        plt.title('H$_2$O density distribution')
+        plt.xlim([0.0, (self.z_range[1] - self.z_range[0])])
+        plt.tight_layout()
+        plt.savefig('cuboid_density_profile.png', dpi=600, format='png')
+        plt.close()
+
+    def plot_cuboid_dipole_orientation(self):
+        """ Plots the density orientation profile. """
+        if not self.rho_of_z.any():
+            print('compute the density orientation profile first\n')
+            return
+        print('plotting')
+        # plot
+        plt.plot(self.z_step, self.rho_of_z)
+        # save data
+        with open('cuboid_density_orientation.dat', 'w') as f:
+            for i in range(len(self.z_step)):
+                f.write(str(self.z_step[i]) + '\t' + str(self.rho_of_z[i]) + '\n')
+        plt.xlabel('z (Å)')
+        plt.ylabel('ρ$_{H_{2}O}$ cos$\\psi$ (g/cm$^3$)')
+        #plt.title('H$_2$O density profile')
+        plt.xlim([0.0, (self.z_range[1] - self.z_range[0])])
+        plt.tight_layout()
+        plt.savefig('cuboid_density_orientation.png', dpi=600, format='png')
+        plt.close()
+
+    def plot_sphere_density_profile(self, atom_type):
+        """ Plots density profile in a sphere around individual atoms. """
         if not self.rho_of_r.any():
-            print('compute the radial density profile first\n')
+            print('compute the density profile first\n')
             return
         print('plotting density profile')
         # plot
@@ -659,10 +940,10 @@ class Trajectory:
         plt.savefig('radial_density_profile.png', dpi=600, format='png')
         plt.close()
 
-    def plot_spherical_angle_distribution(self, atom_type):
-        """ Plots spherical angle distributions wrt individual atoms. """
+    def plot_sphere_angle_distribution(self, atom_type):
+        """ Plots angle distributions in a sphere around individual atoms. """
         if not self.psi_dist.any() or not self.theta_dist.any():
-            print('compute the radial density profile first\n')
+            print('compute the density profile first\n')
             return
 
         avg_dipole = np.sum(self.angle_step * self.psi_dist) / np.sum(self.psi_dist)
@@ -701,35 +982,28 @@ class Trajectory:
 
     def plot_density_profile(self, atom_type):
         """ Plots the density profile. """
-
-        #plt.rcParams["figure.figsize"] = (6,4)
-
         if not self.rho_of_z.any():
             print('compute the density profile first\n')
             return
-
-        bulk_index_bot = int(len(self.z_step) * 9 / (self.z_top - self.z_bot))
-        bulk_index_top = int(len(self.z_step) * (self.z_top - self.z_bot - 9) / (self.z_top - self.z_bot))
-        print(bulk_index_bot, bulk_index_top)
-        bulk_density = self.rho_of_z[bulk_index_bot:bulk_index_top+1]
-        print("average bulk density (>= 9\\A from electrode):", np.mean(bulk_density))
-
+        if self.z_top - self.z_bot > 18.0:
+            # Compute bulk density (>= 9\\A from electrode).
+            bulk_index_bot = int(len(self.z_step) * 9 / (self.z_top - self.z_bot))
+            bulk_rho_of_z = self.rho_of_z[bulk_index_bot:] / self.resolution
+            total_volume = (
+                A * B * (self.z_top - self.z_bot)
+                * 10**(-24) / 2.0)
+            bulk_volume = (
+                A * B * (self.z_top - self.z_bot -  self.dz * 9 * 2)
+                * 10**(-24) / 2.0)
+            bulk_density = np.sum(bulk_rho_of_z) * total_volume / bulk_volume
+            print("Average bulk density (>= 9\\A from electrode):", bulk_density, 'g/cm3')
         print('plotting density profile')
-        # average from both electrode surfaces
-        sum_rho = (self.rho_of_z + self.rho_of_z[::-1])/2
-        # don't average from both electrode surfaces
-        #sum_rho = self.rho_of_z
         # plot
-        plt.plot(self.z_step,sum_rho)
+        plt.plot(self.z_step, self.rho_of_z, 'o-')
         # save data
-        with open('density_profile_new.dat', 'w') as f:
+        with open('density_profile.dat', 'w') as f:
             for i in range(len(self.z_step)):
-                f.write(str(self.z_step[i]) + '\t' + str(sum_rho[i]) + '\n')
-        # To plot a smoother fit of the data, uncomment 2 lines.
-        #f_savgol = savgol_filter(sum_rho, 40, 3)
-        #plt.plot(self.z_step, f_savgol)
-        #plt.plot([0,2.47], [0,0], color='tab:blue')
-
+                f.write(str(self.z_step[i]) + '\t' + str(self.rho_of_z[i]) + '\n')
         plt.xlabel('z (Å)')
         if atom_type == "H2O":
             plt.ylabel('ρ$_{H_{2}O}$ (g/cm$^3$)')
@@ -744,107 +1018,71 @@ class Trajectory:
             plt.ylabel('ρ (g/cm$^3$)')
             plt.title('Density distribution')
         plt.xlim([0.0, (self.z_top - self.z_bot) / 2])
-        #plt.xlim([0.0, (self.z_top - self.z_bot)])
-        #plt.ylim([0,4])
-
         plt.tight_layout()
-        plt.savefig('density_profile_new.png', dpi=600, format='png')
-        #plt.show()
+        plt.savefig('density_profile.png', dpi=600, format='png')
+        plt.close()
 
     def plot_dipole_distribution(self):
         """ Plots the distribution of dipole-normal angles (psi). """
-
-        #plt.rcParams["figure.figsize"] = (6, 4)
-
         if not self.psi_dist.any():
             print('compute angle distributions first\n')
             return
-
         avg_dipole = np.sum(self.angle_step * self.psi_dist) / np.sum(self.psi_dist)
         print("average dipole moment:", avg_dipole)
-
         print('plotting dipole distribution')
         plt.plot(self.angle_step, self.psi_dist)
-        with open('dipole_data_layer1+2.dat', 'w') as f:
+        with open('dipole_distribution.dat', 'w') as f:
             for i in range(len(self.angle_step)):
                 f.write(str(self.angle_step[i]) + '\t' + str(self.psi_dist[i]) + '\n')
-        # To plot a smoother fit of the data, uncomment 2 lines.
-        #f_psi = savgol_filter(self.psi_dist, 40, 3)
-        #plt.plot(self.angle_step, f_psi)
-
         plt.xlabel('Angle from surface normal (degree)')
         plt.ylabel('Probability density')
         plt.title('Dipole angle distribution')
         plt.xticks(np.linspace(0, 180, 10))
         plt.xlim([0,180])
-        #plt.ylim=[0,0.04],
-
         plt.tight_layout()
-        plt.savefig('dipole_distribution_layer1+2.png', dpi=600, format='png')
-        #plt.show()
+        plt.savefig('dipole_distribution.png', dpi=600, format='png')
+        plt.close()
 
     def plot_OH_angle_distribution(self):
         """ Plots the distribution of OH-normal angles (theta). """
-
-        plt.rcParams["figure.figsize"] = (6, 4)
-
         if not self.theta_dist.any():
             print('compute angle distributions first\n')
             return
-
         avg_angle = np.sum(self.angle_step * self.theta_dist) / np.sum(self.theta_dist)
         print("average O-H angle:", avg_angle)
-
         print('plotting O-H distribution')
         plt.plot(self.angle_step, self.theta_dist)
-        with open('O-H_angle_layer1+2.dat', 'w') as f:
+        with open('OH_angle_distribution.dat', 'w') as f:
             for i in range(len(self.angle_step)):
                 f.write(str(self.angle_step[i]) + '\t' + str(self.theta_dist[i]) + '\n')
-        # To plot a smoother fit of the data, uncomment 2 lines.
-        #f_theta = savgol_filter(self.theta_dist, 40, 3)
-        #ax.plot(self.angle_step, f_theta)
-
         plt.xlabel('Angle from surface normal (degree)')
         plt.ylabel('Probability density')
         plt.title('O-H angle distribution')
         plt.xticks(np.linspace(0, 180, 10))
         plt.xlim([0,180])
-        #plt.ylim=[0,0.04],
-
         plt.tight_layout()
-        plt.savefig('OH_angle_dist_layer1+2.png', dpi=600, format='png')
-        #plt.show()
+        plt.savefig('OH_angle_distribution.png', dpi=600, format='png')
+        plt.close()
 
     def plot_dipole_orientation(self):
         """ Plots the density orientation profile. """
-
-        #plt.rcParams["figure.figsize"] = (6,4)
-
         if not self.rho_of_z.any():
             print('compute the density orientation profile first\n')
             return
-
         print('plotting')
         # plot
-        plt.plot(self.z_step,self.rho_of_z)
+        plt.plot(self.z_step, self.rho_of_z)
         # save data
         with open('density_orientation.dat', 'w') as f:
             for i in range(len(self.z_step)):
                 f.write(str(self.z_step[i]) + '\t' + str(self.rho_of_z[i]) + '\n')
-        # To plot a smoother fit of the data, uncomment 2 lines.
-        #f_savgol = savgol_filter(self.rho_of_z, 40, 3)
-        #plt.plot(self.z_step, f_savgol)
-        #plt.plot([0,2.47], [0,0], color='tab:blue')
-
         plt.xlabel('z (Å)')
         plt.ylabel('ρ$_{H_{2}O}$ cos$\\psi$ (g/cm$^3$)')
-        plt.title('H$_2$O density profile')
-        plt.xlim([0.0, (self.z_top - self.z_bot) / 2])
-        #plt.ylim([0,4])
-
+        #plt.title('H$_2$O density profile')
+        plt.xlim([0.0, (self.z_top - self.z_bot)/2])
         plt.tight_layout()
         plt.savefig('density_orientation.png', dpi=600, format='png')
-        #plt.show()
+        plt.close()
 
 start_time = time.time()
 
@@ -864,13 +1102,16 @@ traj = Trajectory(
     top_interface,
     start_timestep,
     stop_timestep,
-    resolution=111,
-    d_angle=4,
-    z_range_min=0.0,
-    #z_range_max=4.05,
-    #z_range_min=4.05,
-    z_range_max=5.95,
-    #z_range_max=7.80,
+    resolution=221,
+    d_angle=1,
+    #z_range_min=0.0,
+    #z_range_max=11.0,
+    #z_range_max=2.75,
+    z_range_min=2.75,
+    z_range_max=3.55,
+    x_min=0.0, x_max=A,
+    y_min=0.0, y_max=B,
+    cuboid_resolution=221,
     center_atom_list=[25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228],
     #r=5.0,
     r=2.8,
@@ -888,7 +1129,9 @@ Select plot type:
 6. Dipole orientation distribution vs z distance
 7. Get average cos(dipole orientation) within z region
 8. H2O number density distribution in spherical region across individual atoms
-9. dipole angle distribution in spherical region across individual atoms
+9. Dipole angle distribution in spherical region across individual atoms
+10. H2O number density distribution in cuboidal region
+11. Dipole orientation distribution vs z distance in cuboidal region
 """)
 
 if calc_type == '1':
@@ -924,12 +1167,21 @@ elif calc_type == '7':
     traj.compute_avg_cos_dipole()
 elif calc_type == '8':
     print("computing...")
-    traj.compute_spherical_density_profile("H2O")
-    traj.plot_spherical_density_profile("H2O")
+    traj.compute_sphere_density_profile("H2O")
+    traj.plot_sphere_density_profile("H2O")
 elif calc_type == '9':
     print("computing...")
-    traj.compute_spherical_angle_distribution("H2O")
-    traj.plot_spherical_angle_distribution("H2O")
+    traj.compute_sphere_angle_distribution("H2O")
+    traj.plot_sphere_angle_distribution("H2O")
+elif calc_type == '10':
+    print("computing...")
+    #traj = Trajectory(options)
+    traj.compute_cuboid_density_profile("H2O")
+    traj.plot_cuboid_density_profile("H2O")
+elif calc_type == '11':
+    print("computing...")
+    traj.compute_cuboid_dipole_orientation()
+    traj.plot_cuboid_dipole_orientation()
 else:
     print("Please choose from one of the options")
 
