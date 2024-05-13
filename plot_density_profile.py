@@ -524,6 +524,7 @@ class Trajectory:
 
         # Normalize for number of steps.
         self.rho_of_r = self.rho_of_r / (self.n_steps)
+        print("Average number of water molecules within", self.r, "Ang of center atom:", sum(self.rho_of_r))
 
     def compute_sphere_angle_distribution(self, atom_type):
         angle_resolution = int(180/self.d_angle)
