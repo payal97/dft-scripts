@@ -5,8 +5,6 @@ from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
 
-#plt.rcParams["font.family"] = "Times New Roman"
-#plt.rcParams["font.size"] = 12
 max_O_H_length = 1.2 # angstrom
 
 
@@ -20,14 +18,32 @@ data_water_molecule:  List of list of coordinates in each water molecule unit.
 data_com:       Coordinates of center of mass for each water molecule unit.
 """
 
-def distance(x0, x1):
-    # ref: https://stackoverflow.com/questions/11108869/optimizing-python-distance-calculation-while-accounting-for-periodic-boundary-co
+def get_distance(x0, x1, A, B, C):
+    """
+    Get distance between two points taking into account periodic boundary
+    condition.
+
+    x0: coordinates of point 1 as numpy array
+    x1: coordinates of point 2 as numpy array
+    A, B, C: dimensions of periodic box
+    return: distance
+    """
+    # ref: https://stackoverflow.com/questions/11108869/optimizing-python-\
+    # distance-calculation-while-accounting-for-periodic-boundary-co
     dimensions = np.array([A, B, C])
     delta = np.abs(x0 - x1)
     delta = np.where(delta > 0.5 * dimensions, delta - dimensions, delta)
     return np.sqrt((delta ** 2).sum(axis=-1))
 
-def apply_period_boundary(coord):
+def apply_period_boundary(coord, A, B, C):
+    """
+    If a point lies outside of periodic box, update coordinates to lie inside of it.
+    Only works in x and y directions.
+
+    coord: coordinates of point
+    A, B, C: dimensions of periodic box
+    return: updated coordinates
+    """
     new_coord = [ i for i in coord]
     # Translate x-coordinate.
     while new_coord[0] < 0:
@@ -42,10 +58,17 @@ def apply_period_boundary(coord):
     return new_coord
 
 def get_H2O_from_O_and_H(data_oxygen, data_hydrogen):
-    """Arrange O and H coordinates in lists of [O,H,H] - corresponding to each H2O.
+    """
+    Arrange O and H coordinates in lists of [O,H,H] - corresponding to each H2O.
     If number of H in 1.2 A radius of O is not equal to 2, this means it is H3O+ or OH-.
     In this case, the whole set it discarded. TL;DR: only 3-atom H2O molecules are
-    returned."""
+    returned.
+
+    data_oxygen: numpy array of O coordinates
+    data_hydrogen: numpy array of H coordinates
+    return: numpy array of H2O molecules listed as [O,H,H],
+               numpy array of center of mass of each H2O molecule
+    """
     # For each O, get H within a raduis of 1.2 A and
     #   save all the atoms as units of one H2O.
     data_water_molecule = []
@@ -57,7 +80,7 @@ def get_H2O_from_O_and_H(data_oxygen, data_hydrogen):
 
         # Find all H in the H2O
         for hydrogen in data_hydrogen:
-            dist = distance(oxygen, hydrogen)
+            dist = get_distance(oxygen, hydrogen, A, B, C)
             if dist <= max_O_H_length:
                 data_water_molecule[-1].append(hydrogen)
 
@@ -126,14 +149,14 @@ def get_atoms_pos(atom_type, coords, atom_list, z_bot, z_top):
     data_com = np.array(data)
     return data, data_com
 
-def get_water_cuboid(coords, atom_list, x1, x2, y1, y2, z1, z2):
+def get_water_cuboid(coords, atom_list, x1, x2, y1, y2, z1, z2, A, B, C):
     """ Get coords of all H2O in region bounded in x1, x2, y1, y2, z1, z2."""
     data_oxygen = []
     data_hydrogen = []
     for i, atom in enumerate(coords):
         # Check if atom lies in box region.
         if atom_list[i] == "O":
-            pbc_atom = apply_period_boundary(atom)
+            pbc_atom = apply_period_boundary(atom, A, B, C)
             # (xi - A) and (xi + A) regions are checked to account for cuboid box
             #   crossing periodic boundary.
             in_x = ((x1 < pbc_atom[0] < x2)
@@ -146,7 +169,7 @@ def get_water_cuboid(coords, atom_list, x1, x2, y1, y2, z1, z2):
             if in_x and in_y and in_z:
                 data_oxygen.append(atom)
         if atom_list[i] == "H":
-            pbc_atom = apply_period_boundary(atom)
+            pbc_atom = apply_period_boundary(atom, A, B, C)
             # Add 1.2 ang to the search region, to account for H2O
             #   that lie on the edge of the region.
             # The final H2O in this region are determined by O coords,
@@ -173,7 +196,7 @@ def get_water_sphere(coords, atom_list, p, r):
     for i, atom in enumerate(coords):
         if atom_list[i] == "O":
             # check if atom lies in spherical region
-            dist = distance(p, atom)
+            dist = get_distance(p, atom, A, B, C)
             if dist < r:
                 data_oxygen.append(atom)
         if atom_list[i] == "H":
@@ -346,29 +369,16 @@ class Trajectory:
         for step in range(self.n_steps):
             if atom_type == "H2O":
                 # Get water molecules and centers of mass.
-                data_coords1, data_com1 = get_water_cuboid(
+                data_coords, data_com = get_water_cuboid(
                     self.coordinates[step], self.atom_list,
                     self.x_range[0], self.x_range[1],
                     self.y_range[0], self.y_range[1],
-                    self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
-                data_coords2, data_com2 = get_water_cuboid(
-                    self.coordinates[step], self.atom_list,
-                    A - self.x_range[1], A - self.x_range[0],
-                    B - self.y_range[1], B - self.y_range[0],
-                    self.z_top - self.z_range[1], self.z_top - self.z_range[0])
+                    self.z_bot + self.z_range[0], self.z_bot + self.z_range[1],
+                    A, B, C)
             else:
                 # Only works with H2O for now.
                 print("Incorrect atom_type. Please choose 'H2O'.")
                 return
-            # Combine all H2Os and account for empty arrays.
-            if data_coords1.size and data_coords2.size:
-                data_coords = np.vstack([data_coords1,data_coords2])
-            elif data_coords1.size and not data_coords2.size:
-                data_coords = data_coords1
-            elif not data_coords1.size and data_coords2.size:
-                data_coords = data_coords2
-            else:
-                continue
 
             # Sweep over intervals of dz width from self.z_range[0] to self.z_range[1]
             #   and count all molecules/atoms (in case of H2O, check coords of O) that
@@ -376,11 +386,8 @@ class Trajectory:
             for i in range(self.cuboid_resolution):
                 z1 = self.z_bot + self.z_range[0] + (i * self.dz)
                 z2 = z1 + self.dz
-                # Account for same region from opposite surface.
-                z2opp = self.z_top - self.z_range[0] - (i * self.dz)
-                z1opp = z2opp - self.dz
                 for water in data_coords:
-                    if z1 < water[0][2] <= z2 or z1opp <= water[0][2] < z2opp:
+                    if z1 < water[0][2] <= z2:
                         self.rho_of_z[i] += 1
 
         # Normalize for number of steps.
@@ -396,12 +403,12 @@ class Trajectory:
             # Only works with H2O for now.
             print("Incorrect atom_type. Please choose 'H2O'.")
             return
-        # Factor of 2.0 to account for full region.
         volume = (
             (self.x_range[1] - self.x_range[0])
             * (self.y_range[1] - self.y_range[0])
-            * self.dz * 2.0 * 10**(-24))
-        self.rho_of_z = (self.rho_of_z * (16+1+1)) / ((6.02214076 * 10**23) * volume)
+            * self.dz * 10**(-24))
+        #self.rho_of_z = (self.rho_of_z * (16+1+1)) / ((6.02214076 * 10**23) * volume)
+        print('Total number density:', sum(self.rho_of_z) / self.resolution)
 
     def compute_cuboid_dipole_orientation(self):
         # Define step size, dz.
@@ -416,44 +423,22 @@ class Trajectory:
 
         for step in range(self.n_steps):
             # Get water molecules and centers of mass.
-            data_coords1, data_com1 = get_water_cuboid(
+            data_coords, data_com = get_water_cuboid(
                 self.coordinates[step], self.atom_list,
                 self.x_range[0], self.x_range[1],
                 self.y_range[0], self.y_range[1],
-                self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
-            data_coords2, data_com2 = get_water_cuboid(
-                self.coordinates[step], self.atom_list,
-                A - self.x_range[1], A - self.x_range[0],
-                B - self.y_range[1], B - self.y_range[0],
-                self.z_top - self.z_range[1], self.z_top - self.z_range[0])
-            # Combine all H2Os and account for empty arrays.
-            if data_coords1.size and data_coords2.size:
-                data_coords = np.vstack([data_coords1,data_coords2])
-            elif data_coords1.size and not data_coords2.size:
-                data_coords = data_coords1
-            elif not data_coords1.size and data_coords2.size:
-                data_coords = data_coords2
-            else:
-                continue
+                self.z_bot + self.z_range[0], self.z_bot + self.z_range[1],
+                A, B, C)
 
             # Sweep over intervals of dz width from self.z_range[0] to self.z_range[1]
             for i in range(self.resolution):
                 z1 = self.z_bot + self.z_range[0] + (i * self.dz)
                 z2 = z1 + self.dz
-                # Account for same region from opposite surface.
-                z2opp = self.z_top - self.z_range[0] - (i * self.dz)
-                z1opp = z2opp - self.dz
-
-                water_in_region1 = []
-                water_in_region2 = []
+                water_in_region = []
                 for water in data_coords:
                     if z1 < water[0][2] <= z2:
-                        water_in_region1.append(water)
-                    elif z1opp <= water[0][2] < z2opp:
-                        water_in_region2.append(water)
+                        water_in_region.append(water)
 
-                # only works for python lists, not numpy arrays
-                water_in_region = water_in_region1 + water_in_region2
                 if len(water_in_region) > 0:
                     cos_psi = np.full(len(water_in_region), -2.0)
                     for k, water in enumerate(water_in_region):
@@ -468,16 +453,16 @@ class Trajectory:
 
                             # https://stackoverflow.com/a/13849249
                             # Get psi in radians.
-                            if np.isin(water, water_in_region1).all():
+                            if water[0][2] < (self.z_top - self.z_bot)/2:
                                 psi = np.arccos(np.dot(bisector, self.surface_normal))
-                            elif np.isin(water, water_in_region2).all():
+                            elif water[0][2] > (self.z_top - self.z_bot)/2:
                                 # reverse direction of surface normal at opposite surface
                                 psi = np.arccos(np.dot(bisector, -1*self.surface_normal))
                             cos_psi[k] = np.cos(psi)
 
                     # Sanity check, to ensure psi from all waters were counted.
                     if -2 in cos_psi:
-                        print("cos(psi) for some H2O in region", z1, z2, z1opp, z2opp, "were not populated")
+                        print("cos(psi) for some H2O in region", z1, z2, "were not populated")
 
                     # Collect all cos_psi which occur within each incremental region.
                     for value in cos_psi:
@@ -490,11 +475,11 @@ class Trajectory:
         # Normalize for number of steps.
         self.rho_of_z = self.rho_of_z / self.n_steps
 
-        # Convert to g/cm3. Factor of 2.0 to account for full region.
+        # Convert to g/cm3.
         volume = (
             (self.x_range[1] - self.x_range[0])
             * (self.y_range[1] - self.y_range[0])
-            * self.dz * 2.0 * 10**(-24))
+            * self.dz * 10**(-24))
         self.rho_of_z = (self.rho_of_z * (16+1+1)) / ((6.02214076 * 10**23) * volume)
 
     def compute_sphere_density_profile(self, atom_type):
@@ -532,7 +517,7 @@ class Trajectory:
                     #dv = 4 * np.pi * r1**2 * self.dr
                     dv = 1
                     for water in data_coords:
-                        dist = distance(p, water[0])
+                        dist = get_distance(p, water[0], A, B, C)
                         if r1 < dist <= r2:
                             self.rho_of_r[i] += 1/dv
 
@@ -598,9 +583,8 @@ class Trajectory:
         self.theta_dist = self.theta_dist / (self.n_steps * num_centers)
 
     def compute_density_profile(self, atom_type):
-        # Define step size, dz. Factor of 2.0 to account for splitting the electrolyte
-        #   into two regions and integrating only up till midway form both sides.
-        self.dz = (self.z_top - self.z_bot) / (2.0 * self.resolution)
+        # Define step size, dz.
+        self.dz = (self.z_top - self.z_bot) / self.resolution
         # Divide electrolyte length into units of dz.
         self.z_step = np.linspace(0.0, self.resolution * self.dz, self.resolution)
 
@@ -610,36 +594,22 @@ class Trajectory:
         for step in range(self.n_steps):
             if atom_type == "H2O":
                 # Get water molecules and centers of mass from both sides.
-                data_coords1, data_com1 = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top / 2)
-                data_coords2, data_com2 = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list, self.z_top / 2, self.z_top)
+                data_coords, data_com = get_water_molecules_and_com(
+                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top)
             elif atom_type in self.atoms:
                 # Get atoms of type atom_type. E.g., "O", "H", etc. from both sides.
-                data_coords1, data_com1 = get_atoms_pos(
+                data_coords, data_com = get_atoms_pos(
                     atom_type,
-                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top / 2)
-                data_coords2, data_com2 = get_atoms_pos(
-                    atom_type,
-                    self.coordinates[step], self.atom_list, self.z_top / 2, self.z_top)
+                    self.coordinates[step], self.atom_list, self.z_bot, self.z_top)
             else:
                 print("Incorrect atom_type. Please choose one of 'H2O' or", self.atoms)
                 return
-            # Combine all H2Os and account for empty arrays.
-            if data_coords1.size and data_coords2.size:
-                data_coords = np.vstack([data_coords1,data_coords2])
-            elif data_coords1.size and not data_coords2.size:
-                data_coords = data_coords1
-            elif not data_coords1.size and data_coords2.size:
-                data_coords = data_coords2
+
             # Sweep over intervals of dz width and count all molecules/atoms that
             #   fall in the region at each step.
             for i in range(self.resolution):
                 z1 = self.z_bot + (i * self.dz)
                 z2 = z1 + self.dz
-                # Account for same region from opposite surface.
-                z2opp = self.z_top - (i * self.dz)
-                z1opp = z2opp - self.dz
                 for water in data_coords:
                     if atom_type == "H2O":
                         # z-coordinate of O atom in H2O.
@@ -648,7 +618,7 @@ class Trajectory:
                         # z-coordinate of atom. Here, "water" variable is not water
                         #   but an atom of atom_type.
                         coord = water[2]
-                    if z1 < coord <= z2 or z1opp <= water[0][2] < z2opp:
+                    if z1 < coord <= z2:
                         self.rho_of_z[i] += 1
 
         # Normalize for number of steps.
@@ -671,12 +641,16 @@ class Trajectory:
             mass = 16
         elif atom_type == "H":
             mass = 1
+        elif atom_type == "F":
+            mass = 19
+        elif atom_type == "Na":
+            mass = 23
         else:
             print("Mass of atom", atom_type, "not defined. Please edit the script to include it.")
             return
-        total_volume = A * B * self.dz * 2.0 * 10**(-24)
-        self.rho_of_z = (self.rho_of_z * mass) / ((6.02214076 * 10**23) * total_volume)
-        print('Total density:', sum(self.rho_of_z) / self.resolution, 'g/cm3')
+        total_volume = A * B * self.dz * 10**(-24)
+        #self.rho_of_z = (self.rho_of_z * mass) / ((6.02214076 * 10**23) * total_volume)
+        print('Total number density:', sum(self.rho_of_z) / self.resolution)
 
     def compute_angle_distribution(self):
         angle_resolution = int(180/self.d_angle)
@@ -690,21 +664,9 @@ class Trajectory:
         for step in range(self.n_steps):
 
             # Get water molecules and centers of mass.
-            # Divide the full electrolyte length into two - both regions have opposite
-            #   surface normals.
-            data_coords1, data_com1 = get_water_molecules_and_com(
+            data_coords, data_com = get_water_molecules_and_com(
                     self.coordinates[step], self.atom_list,
                     self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
-            data_coords2, data_com2 = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list,
-                    self.z_top - self.z_range[1], self.z_top - self.z_range[0])
-            # Combine all H2Os and account for empty arrays.
-            if data_coords1.size and data_coords2.size:
-                data_coords = np.vstack([data_coords1,data_coords2])
-            elif data_coords1.size and not data_coords2.size:
-                data_coords = data_coords1
-            elif not data_coords1.size and data_coords2.size:
-                data_coords = data_coords2
 
             for water in data_coords:
                 if len(water) == 3:
@@ -719,11 +681,11 @@ class Trajectory:
                     # Compute psi, dipole-normal angle, and theta, OH-normal angle.
                     # Convert radians to degrees.
                     # https://stackoverflow.com/a/13849249
-                    if data_coords1.size and np.isin(water, data_coords1).all():
+                    if water[0][2] < (self.z_top - self.z_bot)/2:
                         psi = np.rad2deg(np.arccos(np.dot(bisector, self.surface_normal)))
                         theta1 = np.rad2deg(np.arccos(np.dot(vec1, self.surface_normal)))
                         theta2 = np.rad2deg(np.arccos(np.dot(vec2, self.surface_normal)))
-                    elif data_coords2.size and np.isin(water, data_coords2).all():
+                    elif water[0][2] > (self.z_top - self.z_bot)/2:
                         # reverse direction of surface normal at opposite surface
                         psi = np.rad2deg(np.arccos(np.dot(bisector, -1*self.surface_normal)))
                         theta1 = np.rad2deg(np.arccos(np.dot(vec1, -1*self.surface_normal)))
@@ -750,21 +712,9 @@ class Trajectory:
         for step in range(self.n_steps):
 
             # Get water molecules and centers of mass.
-            # Divide the full electrolyte length into two - both regions have opposite
-            #   surface normals.
-            data_coords1, data_com1 = get_water_molecules_and_com(
+            data_coords, data_com = get_water_molecules_and_com(
                     self.coordinates[step], self.atom_list,
                     self.z_bot + self.z_range[0], self.z_bot + self.z_range[1])
-            data_coords2, data_com2 = get_water_molecules_and_com(
-                    self.coordinates[step], self.atom_list,
-                    self.z_top - self.z_range[1], self.z_top - self.z_range[0])
-            # Combine all H2Os and account for empty arrays.
-            if data_coords1.size and data_coords2.size:
-                data_coords = np.vstack([data_coords1,data_coords2])
-            elif data_coords1.size and not data_coords2.size:
-                data_coords = data_coords1
-            elif not data_coords1.size and data_coords2.size:
-                data_coords = data_coords2
 
             cos_psi = np.full(len(data_coords), -2.0)
 
@@ -780,9 +730,9 @@ class Trajectory:
 
                     # https://stackoverflow.com/a/13849249
                     # Get psi in radians.
-                    if data_coords1.size and np.isin(water, data_coords1).all():
+                    if water[0][2] < (self.z_top - self.z_bot)/2:
                             psi = np.arccos(np.dot(bisector, self.surface_normal))
-                    elif data_coords2.size and np.isin(water, data_coords2).all():
+                    elif water[0][2] > (self.z_top - self.z_bot)/2:
                             # reverse direction of surface normal at opposite surface
                             psi = np.arccos(np.dot(bisector, -1*self.surface_normal))
                     cos_psi[k] = np.cos(psi)
@@ -800,9 +750,7 @@ class Trajectory:
 
     def compute_dipole_orientation(self):
         # Define step size, dz.
-        # The factor of 2.0 is because we are dividing the full electrolyte length
-        #   into two - both regions have opposite surface normals.
-        self.dz = (self.z_top - self.z_bot) / (2.0 * self.resolution)
+        self.dz = (self.z_top - self.z_bot) / self.resolution
         # Divide electrolyte length into units of dz.
         self.z_step = np.linspace(0.0, self.resolution * self.dz, self.resolution)
 
@@ -821,20 +769,11 @@ class Trajectory:
             for i in range(self.resolution):
                 z1 = self.z_bot + (i * self.dz)
                 z2 = z1 + self.dz
-                # Account for same region from opposite surface.
-                z2opp = self.z_top - (i * self.dz)
-                z1opp = z2opp - self.dz
-
-                water_in_region1 = []
-                water_in_region2 = []
+                water_in_region = []
                 for water in data_coords:
                     if z1 < water[0][2] <= z2:
-                        water_in_region1.append(water)
-                    elif z1opp <= water[0][2] < z2opp:
-                        water_in_region2.append(water)
+                        water_in_region.append(water)
 
-                # only works for python lists, not numpy arrays
-                water_in_region = water_in_region1 + water_in_region2
                 if len(water_in_region) > 0:
                     cos_psi = np.full(len(water_in_region), -2.0)
                     for k, water in enumerate(water_in_region):
@@ -849,16 +788,16 @@ class Trajectory:
 
                             # https://stackoverflow.com/a/13849249
                             # Get psi in radians.
-                            if np.isin(water, water_in_region1).all():
+                            if water[0][2] < (self.z_top - self.z_bot)/2:
                                 psi = np.arccos(np.dot(bisector, self.surface_normal))
-                            elif np.isin(water, water_in_region2).all():
+                            elif water[0][2] > (self.z_top - self.z_bot)/2:
                                 # reverse direction of surface normal at opposite surface
                                 psi = np.arccos(np.dot(bisector, -1*self.surface_normal))
                             cos_psi[k] = np.cos(psi)
 
                     # Sanity check, to ensure psi from all waters were counted.
                     if -2 in cos_psi:
-                        print("cos(psi) for some H2O in region", z1, z2, z1opp, z2opp, "were not counted")
+                        print("cos(psi) for some H2O in region", z1, z2, "were not counted")
 
                     # Collect all cos_psi which occur within each incremental region.
                     for value in cos_psi:
@@ -871,8 +810,8 @@ class Trajectory:
         # Normalize for number of steps.
         self.rho_of_z = self.rho_of_z / self.n_steps
 
-        # Convert to g/cm3. Factor of 2.0 to account for full region.
-        volume = A * B * self.dz * 2.0 * 10**(-24)
+        # Convert to g/cm3.
+        volume = A * B * self.dz * 10**(-24)
         self.rho_of_z = (self.rho_of_z * (16+1+1)) / ((6.02214076 * 10**23) * volume)
 
     def plot_cuboid_density_profile(self, atom_type):
@@ -999,7 +938,7 @@ class Trajectory:
             print("Average bulk density (>= 9\\A from electrode):", bulk_density, 'g/cm3')
         print('plotting density profile')
         # plot
-        plt.plot(self.z_step, self.rho_of_z, 'o-')
+        plt.plot(self.z_step, self.rho_of_z)
         # save data
         with open('density_profile.dat', 'w') as f:
             for i in range(len(self.z_step)):
@@ -1017,7 +956,7 @@ class Trajectory:
         else:
             plt.ylabel('ρ (g/cm$^3$)')
             plt.title('Density distribution')
-        plt.xlim([0.0, (self.z_top - self.z_bot) / 2])
+        plt.xlim([0.0, (self.z_top - self.z_bot)])
         plt.tight_layout()
         plt.savefig('density_profile.png', dpi=600, format='png')
         plt.close()
@@ -1079,110 +1018,124 @@ class Trajectory:
         plt.xlabel('z (Å)')
         plt.ylabel('ρ$_{H_{2}O}$ cos$\\psi$ (g/cm$^3$)')
         #plt.title('H$_2$O density profile')
-        plt.xlim([0.0, (self.z_top - self.z_bot)/2])
+        plt.xlim([0.0, (self.z_top - self.z_bot)])
         plt.tight_layout()
         plt.savefig('density_orientation.png', dpi=600, format='png')
         plt.close()
 
-start_time = time.time()
-
 A = 9.7410573959
 B = 8.4360027313
 C = 31.1839570560
-bottom_interface = 4.59198
-top_interface = 26.59198
-start_timestep = 2000
-stop_timestep = 20000
+dimensions = np.array([A, B, C])
 
-traj = Trajectory(
-    'Pt_H2O-pos-1.xyz',
-    'xyz', # specify if 'xyz' format or 'vasp' format
-    50,
-    bottom_interface,
-    top_interface,
-    start_timestep,
-    stop_timestep,
-    resolution=221,
-    d_angle=1,
-    #z_range_min=0.0,
-    #z_range_max=11.0,
-    #z_range_max=2.75,
-    z_range_min=2.75,
-    z_range_max=3.55,
-    x_min=0.0, x_max=A,
-    y_min=0.0, y_max=B,
-    cuboid_resolution=221,
-    center_atom_list=[25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228],
-    #r=5.0,
-    r=2.8,
-    #r=4.5,
-    spherical_resolution=51,
-)
+if __name__ == '__main__':
 
-calc_type = input("""
-Select plot type:
-1. H2O density distribution, ρ(H2O)
-2. O density distribution, ρ(O)
-3. H density distribution, ρ(H)
-4. Dipole orientation distribution vs angle
-5. O-H distribution vs angle
-6. Dipole orientation distribution vs z distance
-7. Get average cos(dipole orientation) within z region
-8. H2O number density distribution in spherical region across individual atoms
-9. Dipole angle distribution in spherical region across individual atoms
-10. H2O number density distribution in cuboidal region
-11. Dipole orientation distribution vs z distance in cuboidal region
-""")
+    start_time = time.time()
 
-if calc_type == '1':
-    print("computing...")
-    traj.compute_density_profile("H2O")
-    traj.plot_density_profile("H2O")
-elif calc_type == '2':
-    print("computing...")
-    traj.compute_density_profile("O")
-    traj.plot_density_profile("O")
-elif calc_type == '3':
-    print("computing...")
-    traj.compute_density_profile("H")
-    traj.plot_density_profile("H")
-elif calc_type == '4':
-    print("Make sure z_range_min and z_range_max are set correctly")
-    print("computing...")
-    traj.compute_angle_distribution()
-    traj.plot_dipole_distribution()
-    traj.plot_OH_angle_distribution()
-elif calc_type == '5':
-    print("Make sure z_range_min and z_range_max are set correctly")
-    print("computing...")
-    traj.compute_angle_distribution()
-    traj.plot_OH_angle_distribution()
-elif calc_type == '6':
-    print("computing...")
-    traj.compute_dipole_orientation()
-    traj.plot_dipole_orientation()
-elif calc_type == '7':
-    print("Make sure z_range_min and z_range_max are set correctly")
-    print("computing...")
-    traj.compute_avg_cos_dipole()
-elif calc_type == '8':
-    print("computing...")
-    traj.compute_sphere_density_profile("H2O")
-    traj.plot_sphere_density_profile("H2O")
-elif calc_type == '9':
-    print("computing...")
-    traj.compute_sphere_angle_distribution("H2O")
-    traj.plot_sphere_angle_distribution("H2O")
-elif calc_type == '10':
-    print("computing...")
-    #traj = Trajectory(options)
-    traj.compute_cuboid_density_profile("H2O")
-    traj.plot_cuboid_density_profile("H2O")
-elif calc_type == '11':
-    print("computing...")
-    traj.compute_cuboid_dipole_orientation()
-    traj.plot_cuboid_dipole_orientation()
-else:
-    print("Please choose from one of the options")
+    bottom_interface = 4.59198
+    top_interface = 26.59198
+    start_timestep = 2000
+    stop_timestep = 10000
 
-print("--- %s seconds ---" % (time.time() - start_time))
+    traj = Trajectory(
+        'Pt_H2O-pos-1.xyz',
+        'xyz', # specify if 'xyz' format or 'vasp' format
+        20,
+        bottom_interface,
+        top_interface,
+        start_timestep,
+        stop_timestep,
+        resolution=221,
+        d_angle=1,
+        z_range_min=0.0,
+        #z_range_max=11.0,
+        #z_range_max=2.75,
+        #z_range_min=2.75,
+        z_range_max=3.50,
+        x_min=0.0, x_max=A,
+        y_min=0.0, y_max=B,
+        cuboid_resolution=221,
+        #center_atom_list=[25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228],
+        #r=5.0,
+        r=2.8,
+        #r=4.5,
+        spherical_resolution=51,
+    )
+
+    calc_type = input("""
+    Select plot type:
+    1. H2O density distribution, ρ(H2O)
+    2. O density distribution, ρ(O)
+    3. H density distribution, ρ(H)
+    4. Dipole orientation distribution vs angle
+    5. O-H distribution vs angle
+    6. Dipole orientation distribution vs z distance
+    7. Get average cos(dipole orientation) within z region
+    8. H2O number density distribution in spherical region across individual atoms
+    9. Dipole angle distribution in spherical region across individual atoms
+    10. H2O number density distribution in cuboidal region
+    11. Dipole orientation distribution vs z distance in cuboidal region
+    12. F density distribution, ρ(F)
+    13. Na density distribution, ρ(Na)
+    """)
+
+    if calc_type == '1':
+        print("computing...")
+        traj.compute_density_profile("H2O")
+        traj.plot_density_profile("H2O")
+    elif calc_type == '2':
+        print("computing...")
+        traj.compute_density_profile("O")
+        traj.plot_density_profile("O")
+    elif calc_type == '3':
+        print("computing...")
+        traj.compute_density_profile("H")
+        traj.plot_density_profile("H")
+    elif calc_type == '4':
+        print("Make sure z_range_min and z_range_max are set correctly")
+        print("computing...")
+        traj.compute_angle_distribution()
+        traj.plot_dipole_distribution()
+        traj.plot_OH_angle_distribution()
+    elif calc_type == '5':
+        print("Make sure z_range_min and z_range_max are set correctly")
+        print("computing...")
+        traj.compute_angle_distribution()
+        traj.plot_OH_angle_distribution()
+    elif calc_type == '6':
+        print("computing...")
+        traj.compute_dipole_orientation()
+        traj.plot_dipole_orientation()
+    elif calc_type == '7':
+        print("Make sure z_range_min and z_range_max are set correctly")
+        print("computing...")
+        traj.compute_avg_cos_dipole()
+    elif calc_type == '8':
+        print("computing...")
+        traj.compute_sphere_density_profile("H2O")
+        traj.plot_sphere_density_profile("H2O")
+    elif calc_type == '9':
+        print("computing...")
+        traj.compute_sphere_angle_distribution("H2O")
+        traj.plot_sphere_angle_distribution("H2O")
+    elif calc_type == '10':
+        print("computing...")
+        #traj = Trajectory(options)
+        traj.compute_cuboid_density_profile("H2O")
+        traj.plot_cuboid_density_profile("H2O")
+    elif calc_type == '11':
+        print("computing...")
+        traj.compute_cuboid_dipole_orientation()
+        traj.plot_cuboid_dipole_orientation()
+    elif calc_type == '12':
+        print("computing...")
+        traj.compute_density_profile("F")
+        traj.plot_density_profile("F")
+    elif calc_type == '13':
+        print("computing...")
+        traj.compute_density_profile("Na")
+        traj.plot_density_profile("Na")
+    else:
+        print("Please choose from one of the options")
+
+    print("--- %s seconds ---" % (time.time() - start_time))
