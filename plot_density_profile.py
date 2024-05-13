@@ -197,7 +197,7 @@ def get_water_sphere(coords, atom_list, p, r):
         if atom_list[i] == "O":
             # check if atom lies in spherical region
             dist = get_distance(p, atom, A, B, C)
-            if dist < r:
+            if 0.0 < dist < r:
                 data_oxygen.append(atom)
         if atom_list[i] == "H":
             # check if atom lies in spherical region
@@ -205,6 +205,7 @@ def get_water_sphere(coords, atom_list, p, r):
             #   that lie on the edge of the region.
             # The final H2O in this region are determined by O coords,
             #   so extra counting of H is okay.
+            dist = get_distance(p, atom, A, B, C)
             if dist < r + 1.2:
                 data_hydrogen.append(atom)
     data_oxygen = np.array(data_oxygen)
@@ -1034,13 +1035,13 @@ if __name__ == '__main__':
 
     bottom_interface = 4.59198
     top_interface = 26.59198
-    start_timestep = 2000
-    stop_timestep = 10000
+    start_timestep = 1
+    stop_timestep = 10
 
     traj = Trajectory(
-        'Pt_H2O-pos-1.xyz',
-        'xyz', # specify if 'xyz' format or 'vasp' format
-        20,
+        'XDATCAR',
+        'vasp', # specify if 'xyz' format or 'vasp' format
+        1,
         bottom_interface,
         top_interface,
         start_timestep,
@@ -1055,9 +1056,10 @@ if __name__ == '__main__':
         x_min=0.0, x_max=A,
         y_min=0.0, y_max=B,
         cuboid_resolution=221,
+        center_atom_list=[167,],
         #center_atom_list=[25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228],
         #r=5.0,
-        r=2.8,
+        r=6.0,
         #r=4.5,
         spherical_resolution=51,
     )
